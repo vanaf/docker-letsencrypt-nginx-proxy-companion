@@ -18,20 +18,20 @@ create_links() {
     local readonly base_domain=${1?missing base_domain argument}
     local readonly domain=${2?missing base_domain argument}
 
-    if [[ ! -f "/etc/nginx/certs/$base_domain"/fullchain.pem || \
-          ! -f "/etc/nginx/certs/$base_domain"/key.pem ]]; then
+    if [[ ! -e "/etc/nginx/certs/$base_domain"/fullchain.pem || \
+          ! -e "/etc/nginx/certs/$base_domain"/privkey.pem ]]; then
         return 1
     fi
     local return_code=1
     create_link "/etc/nginx/certs/$domain".crt "./$base_domain"/fullchain.pem
     return_code=$(( $return_code & $? ))
-    create_link "/etc/nginx/certs/$domain".key "./$base_domain"/key.pem
+    create_link "/etc/nginx/certs/$domain".key "./$base_domain"/privkey.pem
     return_code=$(( $return_code & $? ))
     if [[ -f "/etc/nginx/certs/dhparam.pem" ]]; then
         create_link "/etc/nginx/certs/$domain".dhparam.pem ./dhparam.pem
         return_code=$(( $return_code & $? ))
     fi
-    if [[ -f "/etc/nginx/certs/$base_domain"/chain.pem ]]; then
+    if [[ -e "/etc/nginx/certs/$base_domain"/chain.pem ]]; then
         create_link "/etc/nginx/certs/$domain".chain.pem "./$base_domain"/chain.pem
         return_code=$(( $return_code & $? ))
     fi
@@ -60,7 +60,6 @@ update_certs() {
         fi
 
         params_d_str=""
-        [[ $DEBUG == true ]] && params_d_str+=" -v"
 
         hosts_array_expanded=("${!hosts_array}")
         # First domain will be our base domain
@@ -69,47 +68,26 @@ update_certs() {
         if [[ "$create_test_certificate" == true ]]; then
             # Use staging acme end point
             acme_ca_uri="https://acme-staging.api.letsencrypt.org/directory"
-            if [[ ! -f /etc/nginx/certs/.${base_domain}.test ]]; then
-                # Remove old certificates
-                rm -rf /etc/nginx/certs/${base_domain}
-                for domain in "${!hosts_array}"; do
-                    rm -f /etc/nginx/certs/$domain.{crt,key,dhparam.pem}
-                done
-                touch /etc/nginx/certs/.${base_domain}.test
-            fi
         else
             acme_ca_uri="$ACME_CA_URI"
-            if [[ -f /etc/nginx/certs/.${base_domain}.test ]]; then
-                # Remove old test certificates
-                rm -rf /etc/nginx/certs/${base_domain}
-                for domain in "${!hosts_array}"; do
-                    rm -f /etc/nginx/certs/$domain.{crt,key,dhparam.pem}
-                done
-                rm -f /etc/nginx/certs/.${base_domain}.test
-            fi
         fi
 
         # Create directory for the first domain
         mkdir -p /etc/nginx/certs/$base_domain
         cd /etc/nginx/certs/$base_domain
-
+        params_d_str+=" -d ${!hosts_array}"
         for domain in "${!hosts_array}"; do
-            # Add all the domains to certificate
-            params_d_str+=" -d $domain"
             # Add location configuration for the domain
             add_location_configuration "$domain" || reload_nginx
         done
-
+        mkdir -p /usr/share/nginx/html/.well-known/acme-challenge
         echo "Creating/renewal $base_domain certificates... (${hosts_array_expanded[*]})"
-        /usr/bin/simp_le \
-            -f account_key.json -f key.pem -f chain.pem -f fullchain.pem -f cert.pem \
-            --tos_sha256 6373439b9f29d67a5cd4d18cbc7f264809342dbf21cb2ba2fc7588df987a6221 \
-            $params_d_str \
-            --email "${!email_varname}" \
-            --server=$acme_ca_uri \
-            --default_root /usr/share/nginx/html/
+	mkdir -p /etc/dehydrated /lib/dehydrated
+	echo -e "BASEDIR=/var/lib/dehydrated\nCA=$acme_ca_uri\nCONTACT_EMAIL=${!email_varname}\nWELLKNOWN=/usr/share/nginx/html/.well-known/acme-challenge" > /etc/dehydrated/config
+	[[ "$CHALLENGETYPE" == "dns-01" ]] && echo 'HOOK=/cli53-hook.sh' >> /etc/dehydrated/config
+        /usr/local/bin/dehydrated -c -o /etc/nginx/certs/ -t "$CHALLENGETYPE" $params_d_str 
 
-        simp_le_return=$?
+        le_return=$?
 
         for altnames in ${hosts_array_expanded[@]:1}; do
             # Remove old CN domain that now are altnames
@@ -118,7 +96,7 @@ update_certs() {
 
         for domain in "${!hosts_array}"; do
             create_links $base_domain $domain && reload_nginx='true'
-            [[ $simp_le_return -eq 0 ]] && reload_nginx='true'
+            [[ $le_return -eq 0 ]] && reload_nginx='true'
         done
     done
 
